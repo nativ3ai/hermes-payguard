@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-payguard"
+version = "0.1.0"
+description = "Safe-by-design USDC and x402 payment plugin for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "nativ3ai"}]
+dependencies = [
+  "httpx>=0.27,<0.29",
+  "PyYAML>=6.0",
+  "x402[evm]>=0.9.5",
+]
+
+[project.optional-dependencies]
+test = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+payguard = "hermes_payguard.cli:main"
+
+[project.entry-points."hermes_agent.plugins"]
+"hermes-payguard" = "hermes_payguard.plugin"
+
+[tool.setuptools]
+packages = ["hermes_payguard"]
