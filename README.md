@@ -11,6 +11,13 @@ It does not patch Hermes core. It installs as an add-on and gives Hermes payment
 - Tiny x402 micropayments can auto-run below a configured threshold.
 - Mainnet is the default profile; testnet is an explicit override.
 
+## Documentation
+
+- Install: [`docs/installation.md`](docs/installation.md)
+- Operator flow: [`docs/operator-guide.md`](docs/operator-guide.md)
+- CCTP executor boundary: [`docs/cctp-executor.md`](docs/cctp-executor.md)
+- Architecture: [`docs/architecture.md`](docs/architecture.md)
+
 ## What it supports
 
 - Circle developer-controlled USDC transfers
@@ -52,6 +59,17 @@ pip install -e /path/to/hermes-payguard
 
 ```bash
 pip install hermes-payguard
+```
+
+Quick path:
+
+```bash
+git clone https://github.com/nativ3ai/hermes-payguard.git
+cd hermes-payguard
+pip install -e .
+payguard install-plugin
+payguard init-policy
+payguard doctor
 ```
 
 ## Configure
@@ -175,6 +193,9 @@ Verified locally:
 Detailed notes:
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/installation.md`](docs/installation.md)
+- [`docs/operator-guide.md`](docs/operator-guide.md)
+- [`docs/cctp-executor.md`](docs/cctp-executor.md)
 
 ## Tool summary
 
