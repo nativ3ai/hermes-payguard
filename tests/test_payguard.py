@@ -16,11 +16,12 @@ from x402.http.utils import encode_payment_required_header
 
 from hermes_payguard import plugin
 from hermes_payguard.cli import main as cli_main
-from hermes_payguard.config import DEFAULT_POLICY_TEXT
+from hermes_payguard.config import DEFAULT_POLICY_TEXT, load_config
 from hermes_payguard.tools import (
     execute_payment_intent,
     fetch_paid_url,
     get_payment_intent,
+    prepare_cctp_transfer,
     prepare_usdc_transfer,
 )
 
@@ -116,6 +117,60 @@ class X402MockHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(body).encode("utf-8"))
 
 
+class CCTPMockHandler(BaseHTTPRequestHandler):
+    requests: list[dict] = []
+
+    def log_message(self, format, *args):  # noqa: A003
+        return
+
+    def do_GET(self):  # noqa: N802
+        CCTPMockHandler.requests.append({"method": "GET", "path": self.path, "headers": dict(self.headers)})
+        if self.path.startswith("/v2/burn/USDC/fees/6/3"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            body = [
+                {"finalityThreshold": 1000, "minimumFee": 1, "forwardFee": {"low": 90, "medium": 110, "high": 160}},
+                {"finalityThreshold": 2000, "minimumFee": 0, "forwardFee": {"low": 90, "medium": 110, "high": 160}},
+            ]
+            self.wfile.write(json.dumps(body).encode("utf-8"))
+            return
+        if self.path.startswith("/v2/messages/6"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            body = {
+                "messages": [
+                    {
+                        "messageHash": "0xmessage",
+                        "transactionHash": "0xtransfer",
+                        "status": "complete",
+                        "attestation": "0xattestation",
+                        "eventNonce": "42",
+                        "forwardTxHash": "0xforward",
+                    }
+                ]
+            }
+            self.wfile.write(json.dumps(body).encode("utf-8"))
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        CCTPMockHandler.requests.append({"method": "POST", "path": self.path, "headers": dict(self.headers), "payload": payload})
+        if self.path == "/execute-cctp":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            body = {"transactionHash": "0xtransfer", "executorStatus": "submitted"}
+            self.wfile.write(json.dumps(body).encode("utf-8"))
+            return
+        self.send_response(404)
+        self.end_headers()
+
+
 @pytest.fixture()
 def hermes_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "hermes"
@@ -128,6 +183,15 @@ def hermes_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _write_policy(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
+
+
+def test_load_config_defaults_to_mainnet(hermes_home: Path):
+    config = load_config()
+    assert config.network_profile == "mainnet"
+    assert config.policy.default_chain == "BASE"
+    assert config.circle_api_base_url == "https://api.circle.com"
+    assert config.circle_cctp_api_base_url == "https://iris-api.circle.com"
+    assert config.x402_network == "eip155:8453"
 
 
 def test_prepare_and_execute_circle_dev_transfer(hermes_home: Path, monkeypatch: pytest.MonkeyPatch):
@@ -292,6 +356,61 @@ def test_policy_rejects_unlisted_circle_recipient(hermes_home: Path):
     assert prepared["intent"]["status"] == "rejected"
 
 
+def test_prepare_and_execute_cctp_transfer(hermes_home: Path, monkeypatch: pytest.MonkeyPatch):
+    port = _free_port()
+    CCTPMockHandler.requests.clear()
+    _write_policy(
+        hermes_home / "payguard" / "policy.yaml",
+        """mode: enforce
+network_profile: testnet
+asset: USDC
+default_chain: BASE-SEPOLIA
+per_payment_limit_usdc: 100
+micro_auto_approve_limit_usdc: 0.05
+allowed_circle_recipients:
+  - 0xabc0000000000000000000000000000000000000
+allow_unlisted_circle_recipients: false
+allow_unlisted_cctp_destinations: true
+allowed_x402_hosts: [127.0.0.1]
+allow_unlisted_x402_hosts: false
+""",
+    )
+    monkeypatch.setenv("CIRCLE_CCTP_API_BASE_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("CCTP_EXECUTOR_URL", f"http://127.0.0.1:{port}/execute-cctp")
+
+    with _ThreadedHTTPServer(CCTPMockHandler, port):
+        prepared = json.loads(
+            prepare_cctp_transfer(
+                {
+                    "amount_usdc": 12.5,
+                    "recipient": "0xabc0000000000000000000000000000000000000",
+                    "destination_chain": "ARBITRUM",
+                    "source_chain": "BASE-SEPOLIA",
+                    "reason": "cross-chain treasury rebalance",
+                    "transfer_speed": "fast",
+                    "use_forwarder": True,
+                    "forward_gas_level": "medium",
+                }
+            )
+        )
+        assert prepared["success"] is True
+        assert prepared["intent"]["status"] == "pending_approval"
+        assert prepared["quote"]["destination_chain"] == "ARBITRUM"
+        assert prepared["quote"]["source_domain"] == 6
+        intent_id = prepared["intent"]["id"]
+        assert cli_main(["approve", intent_id, "--ttl-seconds", "120"]) == 0
+        executed = json.loads(execute_payment_intent({"intent_id": intent_id}))
+        assert executed["success"] is True
+        assert executed["intent"]["status"] == "executed"
+        assert executed["intent"]["provider_response"]["executor_response"]["transactionHash"] == "0xtransfer"
+        assert executed["intent"]["provider_response"]["message_status"]["attestation"] == "0xattestation"
+
+    paths = [item["path"] for item in CCTPMockHandler.requests]
+    assert any(path.startswith("/v2/burn/USDC/fees/6/3") for path in paths)
+    assert "/execute-cctp" in paths
+    assert any(path.startswith("/v2/messages/6") for path in paths)
+
+
 def test_plugin_registers_expected_tools():
     registered = []
 
@@ -302,6 +421,7 @@ def test_plugin_registers_expected_tools():
     plugin.register(FakeCtx())
     assert set(registered) == {
         "payguard_prepare_usdc_transfer",
+        "payguard_prepare_cctp_transfer",
         "payguard_execute_payment_intent",
         "payguard_get_payment_intent",
         "payguard_list_payment_intents",

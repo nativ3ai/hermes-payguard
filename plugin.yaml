@@ -4,6 +4,7 @@ description: Safe-by-design USDC and x402 payment tools for Hermes Agent
 author: nativ3ai
 provides_tools:
   - payguard_prepare_usdc_transfer
+  - payguard_prepare_cctp_transfer
   - payguard_execute_payment_intent
   - payguard_get_payment_intent
   - payguard_list_payment_intents

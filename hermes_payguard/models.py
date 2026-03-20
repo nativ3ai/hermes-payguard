@@ -27,18 +27,22 @@ def json_safe(value: Any) -> Any:
 
 class IntentKind(str, Enum):
     USDC_TRANSFER = "usdc_transfer"
+    CCTP_TRANSFER = "cctp_transfer"
     X402_FETCH = "x402_fetch"
 
 
 class PaymentRail(str, Enum):
     CIRCLE_DEV = "circle_dev"
     CIRCLE_USER = "circle_user"
+    CIRCLE_CCTP = "circle_cctp"
     X402 = "x402"
 
 
 class IntentStatus(str, Enum):
     PENDING_APPROVAL = "pending_approval"
     READY = "ready"
+    BRIDGING = "bridging"
+    ATTESTATION_PENDING = "attestation_pending"
     EXECUTED = "executed"
     CHALLENGE_CREATED = "challenge_created"
     REJECTED = "rejected"

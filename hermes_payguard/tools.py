@@ -5,11 +5,12 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
+from .cctp import CCTPClient
 from .circle import CircleClient
 from .config import RuntimeConfig, load_config
 from .ledger import IntentLedger
 from .models import IntentKind, IntentStatus, PaymentIntent, PaymentRail
-from .policy import evaluate_usdc_transfer, evaluate_x402_quote
+from .policy import CCTPQuote, evaluate_cctp_transfer, evaluate_usdc_transfer, evaluate_x402_quote
 from .x402_exec import X402Executor
 
 
@@ -33,6 +34,22 @@ def _intent_summary(intent: PaymentIntent) -> dict[str, Any]:
 
 def check_payguard_available() -> bool:
     return True
+
+
+def _cctp_quote_from_metadata(metadata: dict[str, Any]) -> CCTPQuote:
+    quote = metadata.get("cctp_quote") or {}
+    return CCTPQuote(
+        amount_usdc=Decimal(str(quote["amount_usdc"])),
+        estimated_fee_usdc=Decimal(str(quote["estimated_fee_usdc"])),
+        source_chain=str(quote["source_chain"]),
+        destination_chain=str(quote["destination_chain"]),
+        source_domain=int(quote["source_domain"]),
+        destination_domain=int(quote["destination_domain"]),
+        selected_finality_threshold=int(quote["selected_finality_threshold"]),
+        forward_fee_usdc=Decimal(str(quote["forward_fee_usdc"])),
+        minimum_fee_bps=int(quote["minimum_fee_bps"]),
+        use_forwarder=bool(quote["use_forwarder"]),
+    )
 
 
 def prepare_usdc_transfer(args: dict[str, Any], **_: Any) -> str:
@@ -72,6 +89,90 @@ def prepare_usdc_transfer(args: dict[str, Any], **_: Any) -> str:
     })
 
 
+def prepare_cctp_transfer(args: dict[str, Any], **_: Any) -> str:
+    config, ledger = _services()
+    amount_usdc = Decimal(str(args["amount_usdc"]))
+    source_chain = str(args.get("source_chain", config.policy.default_chain))
+    destination_chain = str(args["destination_chain"])
+    use_forwarder = bool(args.get("use_forwarder", False))
+    transfer_speed = str(args.get("transfer_speed", "standard"))
+    forward_gas_level = str(args.get("forward_gas_level", "medium"))
+
+    cctp = CCTPClient(config)
+    quote = cctp.select_quote(
+        amount_usdc=amount_usdc,
+        source_chain=source_chain,
+        destination_chain=destination_chain,
+        transfer_speed=transfer_speed,
+        use_forwarder=use_forwarder,
+        forward_gas_level=forward_gas_level,
+    )
+    intent = PaymentIntent(
+        id=str(uuid.uuid4()),
+        kind=IntentKind.CCTP_TRANSFER,
+        rail=PaymentRail.CIRCLE_CCTP,
+        asset=str(args.get("asset", "USDC")),
+        amount_usdc=str(amount_usdc),
+        recipient=str(args["recipient"]),
+        chain=source_chain,
+        reason=str(args.get("reason", "")),
+        metadata={
+            "destination_chain": quote.destination_chain,
+            "source_domain": quote.source_domain,
+            "destination_domain": quote.destination_domain,
+            "transfer_speed": transfer_speed,
+            "use_forwarder": use_forwarder,
+            "forward_gas_level": forward_gas_level,
+            "cctp_quote": {
+                "amount_usdc": str(quote.amount_usdc),
+                "estimated_fee_usdc": str(quote.estimated_fee_usdc),
+                "source_chain": quote.source_chain,
+                "destination_chain": quote.destination_chain,
+                "source_domain": quote.source_domain,
+                "destination_domain": quote.destination_domain,
+                "selected_finality_threshold": quote.selected_finality_threshold,
+                "forward_fee_usdc": str(quote.forward_fee_usdc),
+                "minimum_fee_bps": quote.minimum_fee_bps,
+                "use_forwarder": quote.use_forwarder,
+            },
+        },
+        source_wallet_id=args.get("source_wallet_id"),
+        source_wallet_address=args.get("source_wallet_address"),
+        token_id=args.get("token_id"),
+    )
+    decision = evaluate_cctp_transfer(intent, quote, config.policy)
+    intent.requires_approval = decision.requires_approval
+    intent.auto_approved = decision.auto_approved
+    intent.policy_reason = decision.reason
+    intent.policy_details = decision.details
+    if not decision.allowed:
+        intent.status = IntentStatus.REJECTED
+        ledger.save_intent(intent)
+        ledger.audit("intent_rejected", intent.id, {"reason": decision.reason, "details": decision.details})
+        return _json({"success": False, "intent": intent.to_dict(), "error": decision.reason})
+    intent.status = IntentStatus.PENDING_APPROVAL
+    ledger.save_intent(intent)
+    ledger.audit(
+        "intent_created",
+        intent.id,
+        {
+            "kind": intent.kind.value,
+            "rail": intent.rail.value,
+            "amount_usdc": intent.amount_usdc,
+            "source_chain": source_chain,
+            "destination_chain": destination_chain,
+        },
+    )
+    return _json(
+        {
+            "success": True,
+            "intent": _intent_summary(intent),
+            "quote": intent.metadata["cctp_quote"],
+            "next_step": "operator_approval_required",
+        }
+    )
+
+
 def execute_payment_intent(args: dict[str, Any], **_: Any) -> str:
     config, ledger = _services()
     intent_id = str(args["intent_id"])
@@ -80,6 +181,8 @@ def execute_payment_intent(args: dict[str, Any], **_: Any) -> str:
         return _json({"success": False, "error": f"Unknown intent: {intent_id}"})
     if intent.kind == IntentKind.USDC_TRANSFER:
         decision = evaluate_usdc_transfer(intent, config.policy)
+    elif intent.kind == IntentKind.CCTP_TRANSFER:
+        decision = evaluate_cctp_transfer(intent, _cctp_quote_from_metadata(intent.metadata), config.policy)
     else:
         executor = X402Executor(config)
         probe = executor.probe(intent.recipient)
@@ -119,6 +222,18 @@ def execute_payment_intent(args: dict[str, Any], **_: Any) -> str:
             else:
                 raise ValueError(f"Unsupported rail for transfer intent: {intent.rail.value}")
             intent.provider_response = {"rail": result.rail, "response": result.response}
+        elif intent.kind == IntentKind.CCTP_TRANSFER:
+            cctp = CCTPClient(config)
+            transaction_hash = args.get("transaction_hash")
+            result = cctp.execute_or_resume(intent, transaction_hash=transaction_hash)
+            intent.provider_response = {
+                "executor_response": result.executor_response,
+                "message_status": result.message_status,
+            }
+            if result.message_status and str(result.message_status.get("attestation") or "").strip():
+                intent.status = IntentStatus.EXECUTED
+            else:
+                intent.status = IntentStatus.ATTESTATION_PENDING
         elif intent.kind == IntentKind.X402_FETCH:
             x402 = X402Executor(config)
             result = x402.fetch(intent.recipient)

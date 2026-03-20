@@ -38,6 +38,18 @@ Use when the end user should approve the transfer in Circle's challenge/UI flow.
 - create Circle user-controlled transfer challenge
 - return `challengeId`
 
+### Circle CCTP
+
+Use when the recipient chain differs from the source chain.
+
+- resolve source and destination Circle domains
+- fetch current CCTP route fees from Circle's CCTP API
+- stage a cross-chain intent with explicit operator approval
+- call an external executor to submit the source-chain burn transaction
+- poll Circle's message/attestation API and persist transfer state
+
+PayGuard intentionally does not embed a hot burn signer into the plugin. The live burn step belongs behind a dedicated executor service or signer boundary.
+
 ### x402
 
 Use for paid HTTP resources and micropayments.
@@ -67,8 +79,10 @@ By default, state lives under `~/.hermes/payguard/`:
 
 The automated suite covers:
 
+- mainnet default profile selection
 - Circle developer-controlled transfer flow using a local mock of the documented endpoint
 - Circle user-controlled challenge flow using a local mock of the documented endpoint
+- Circle CCTP fee route + executor + message/attestation tracking using local mocks
 - x402-compatible paid fetch flow using a local resource server that emits a real `PAYMENT-REQUIRED` header and accepts a retried signed request
 - Hermes plugin discovery/registration
 
